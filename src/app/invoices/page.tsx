@@ -1,14 +1,26 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { supabaseService as sb } from '@/lib/supabase';
 import { revalidatePath } from 'next/cache';
 
+type InvoiceRow = {
+  id: string;
+  number: string;
+  amount: number | string;
+  due_date: string;              // ISO date string
+  status: string;
+  send_count: number | null;
+  last_sent_at: string | null;
+  customers: { name: string } | null;
+};
+
 /** CARGA DE DATOS (server) */
-async function getInvoices() {
+async function getInvoices(): Promise<InvoiceRow[]> {
   const { data, error } = await sb
     .from('invoices')
     .select('id, number, amount, due_date, status, send_count, last_sent_at, customers:customer_id(name)')
     .order('due_date', { ascending: true });
   if (error) throw error;
-  return data || [];
+  return (data as InvoiceRow[]) || [];
 }
 
 /** ACCIÓN: marcar como pagado (server action) */
@@ -42,7 +54,7 @@ export default async function InvoicesPage() {
             </tr>
           </thead>
           <tbody>
-            {invoices.map((r: any) => (
+            {invoices.map((r: InvoiceRow) => (
               <tr key={r.id} style={{ borderTop: '1px solid #eee' }}>
                 <td style={{ padding: 12 }}>{r.number}</td>
                 <td style={{ padding: 12 }}>{r.customers?.name}</td>
@@ -53,12 +65,15 @@ export default async function InvoicesPage() {
                     {r.status}
                   </span>
                 </td>
-                <td style={{ padding: 12 }}>{r.send_count || 0}</td>
+                <td style={{ padding: 12 }}>{r.send_count ?? 0}</td>
                 <td style={{ padding: 12 }}>
                   {r.status !== 'paid' ? (
                     <form action={markPaidAction} style={{ display: 'inline' }}>
                       <input type="hidden" name="id" value={r.id} />
-                      <button type="submit" style={{ color: '#065f46', textDecoration: 'underline', background: 'none', border: 0, cursor: 'pointer' }}>
+                      <button
+                        type="submit"
+                        style={{ color: '#065f46', textDecoration: 'underline', background: 'none', border: 0, cursor: 'pointer' }}
+                      >
                         Marcar pagado
                       </button>
                     </form>
