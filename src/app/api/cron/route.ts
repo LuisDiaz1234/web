@@ -1,25 +1,28 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseService as sb } from '@/lib/supabase';
 import { sendEmail } from '@/lib/mail';
+import { sendWA } from '@/lib/wa';
+
+export const runtime = 'nodejs'; // asegura Node (necesario para fetch/buffer)
 
 const TZ = process.env.TIMEZONE || 'America/Panama';
 
 type Settings = {
   business_name: string | null;
-  channel: string | null; // 'EMAIL' | 'WHATSAPP' | 'BOTH'
+  channel: 'EMAIL' | 'WHATSAPP' | 'BOTH' | null;
 };
 
 type CustomerInfo = {
   name: string | null;
   email?: string | null;
+  whatsapp?: string | null;
 };
 
 type InvoiceRPC = {
   id: string;
   number: string;
   amount: number | string;
-  due_date: string; // ISO string (date)
+  due_date: string; // ISO
   status: string;
   pay_link: string | null;
   send_count: number | null;
@@ -37,10 +40,8 @@ function withinHours() {
 }
 
 export async function GET(req: NextRequest) {
-  // 1) Si viene del cron de Vercel, trae este header
+  // Permite Vercel Cron o acceso manual con ?key=CRON_SECRET
   const fromVercel = req.headers.get('x-vercel-cron') !== null;
-
-  // 2) Si NO viene de Vercel, exigimos ?key=CRON_SECRET para pruebas manuales
   const key = req.nextUrl.searchParams.get('key');
   if (!fromVercel && key !== process.env.CRON_SECRET) {
     return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
@@ -51,15 +52,19 @@ export async function GET(req: NextRequest) {
   }
 
   // Facturas a recordar (–3, 0, +3, +7)
-  const { data: raw } = await sb.rpc('invoices_due_for_reminder');
+  const { data: raw, error } = await sb.rpc('invoices_due_for_reminder');
+  if (error) {
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  }
   const invoices = (raw ?? []) as InvoiceRPC[];
 
   const { data: st } = await sb.from('settings').select('*').limit(1).maybeSingle();
   const settings = (st ?? {}) as Partial<Settings>;
   const business = settings.business_name || 'Tu Negocio';
-  const channel = (settings.channel || 'EMAIL').toUpperCase(); // EMAIL | WHATSAPP | BOTH
+  const channel = (settings.channel || 'EMAIL').toUpperCase() as 'EMAIL' | 'WHATSAPP' | 'BOTH';
 
-  let sent = 0;
+  let emailsSent = 0;
+  let waSent = 0;
 
   for (const inv of invoices) {
     const kind =
@@ -67,42 +72,61 @@ export async function GET(req: NextRequest) {
       inv.delta === 0  ? 'HOY'    :
       inv.delta === 3  ? 'POST3'  : 'POST7';
 
-    const line = (suffix: string) =>
-      `Factura ${inv.number} (B/. ${inv.amount}) ${suffix}\n` +
-      `Cliente: ${inv.customers?.name ?? ''}\n` +
-      `${inv.pay_link ? `Link de pago: ${inv.pay_link}\n` : ''}— ${business}`;
+    const suffix =
+      kind === 'PREVIO' ? `vence el ${inv.due_date}` :
+      kind === 'HOY'    ? `vence HOY` :
+      kind === 'POST3'  ? `vencida hace 3 días` :
+                          `vencida hace 7 días`;
 
-    // EMAIL (en esta fase solo email; WA se agrega luego)
+    const body = `Factura ${inv.number} (B/. ${inv.amount}) ${suffix}
+Cliente: ${inv.customers?.name ?? ''}
+${inv.pay_link ? `Link de pago: ${inv.pay_link}\n` : ''}— ${business}`;
+
+    // EMAIL
     if (channel === 'EMAIL' || channel === 'BOTH') {
-      const to = inv.customers?.email;
+      const to = inv.customers?.email || null;
       if (to) {
         const subject = kind === 'HOY'
           ? `Hoy vence tu factura ${inv.number}`
           : `Recordatorio factura ${inv.number}`;
-        const text = line(
-          kind === 'PREVIO' ? `vence el ${inv.due_date}` :
-          kind === 'HOY'    ? `vence HOY` :
-          kind === 'POST3'  ? `vencida hace 3 días` :
-                              `vencida hace 7 días`
-        );
         try {
-          await sendEmail(to, subject, text);
+          await sendEmail(to, subject, body);
           await sb.from('messages_log').insert({ invoice_id: inv.id, channel: 'EMAIL', kind, result: 'OK' });
-          sent++;
+          emailsSent++;
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          await sb.from('messages_log').insert({
-            invoice_id: inv.id, channel: 'EMAIL', kind, result: 'ERROR', detail: msg
-          });
+          await sb.from('messages_log').insert({ invoice_id: inv.id, channel: 'EMAIL', kind, result: 'ERROR', detail: msg });
         }
       }
     }
 
-    await sb
-      .from('invoices')
+    // WHATSAPP
+    if (channel === 'WHATSAPP' || channel === 'BOTH') {
+      const wa = inv.customers?.whatsapp || null;
+      if (wa) {
+        try {
+          await sendWA(wa, body);
+          await sb.from('messages_log').insert({ invoice_id: inv.id, channel: 'WHATSAPP', kind, result: 'OK' });
+          waSent++;
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await sb.from('messages_log').insert({ invoice_id: inv.id, channel: 'WHATSAPP', kind, result: 'ERROR', detail: msg });
+        }
+      }
+    }
+
+    // contadores
+    await sb.from('invoices')
       .update({ send_count: (inv.send_count ?? 0) + 1, last_sent_at: new Date().toISOString() })
       .eq('id', inv.id);
   }
 
-  return NextResponse.json({ ok: true, processed: invoices.length, emails_sent: sent });
+  // agrega "version" para que confirmes que esta es la versión nueva
+  return NextResponse.json({
+    ok: true,
+    version: 'wa-1',
+    processed: invoices.length,
+    emails_sent: emailsSent,
+    wa_sent: waSent
+  });
 }
