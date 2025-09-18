@@ -1,6 +1,9 @@
 import { supabaseService as sb } from '@/lib/supabase';
 import { markPaidAction } from './actions';
 
+/** TIPADO */
+type Customer = { name: string } | null;
+
 type InvoiceRow = {
   id: string;
   number: string;
@@ -9,17 +12,33 @@ type InvoiceRow = {
   status: string;
   send_count: number | null;
   last_sent_at: string | null;
-  customers: { name: string } | null;
+  /** Usamos alias singular "customer" para forzar relación 1→1 */
+  customer: Customer;
 };
 
-/** CARGA DE DATOS (server) */
+/** CARGA DE DATOS (server)
+ *  Nota: usamos la forma `customers!invoices_customer_id_fkey` para
+ *  desambiguar la relación y que venga como OBJETO, no arreglo.
+ */
 async function getInvoices(): Promise<InvoiceRow[]> {
   const { data, error } = await sb
     .from('invoices')
-    .select('id, number, amount, due_date, status, send_count, last_sent_at, customers:customer_id(name)')
+    .select(`
+      id,
+      number,
+      amount,
+      due_date,
+      status,
+      send_count,
+      last_sent_at,
+      customer:customers!invoices_customer_id_fkey ( name )
+    `)
     .order('due_date', { ascending: true });
+
   if (error) throw error;
-  return (data as InvoiceRow[]) || [];
+
+  // Cast seguro ahora que la relación es 1→1
+  return (data as unknown as InvoiceRow[]) ?? [];
 }
 
 export default async function InvoicesPage() {
@@ -43,10 +62,10 @@ export default async function InvoicesPage() {
             </tr>
           </thead>
           <tbody>
-            {invoices.map((r: InvoiceRow) => (
+            {invoices.map((r) => (
               <tr key={r.id} style={{ borderTop: '1px solid #eee' }}>
                 <td style={{ padding: 12 }}>{r.number}</td>
-                <td style={{ padding: 12 }}>{r.customers?.name}</td>
+                <td style={{ padding: 12 }}>{r.customer?.name ?? ''}</td>
                 <td style={{ padding: 12 }}>{new Date(r.due_date).toLocaleDateString('es-PA')}</td>
                 <td style={{ padding: 12 }}>B/. {Number(r.amount).toFixed(2)}</td>
                 <td style={{ padding: 12 }}>
