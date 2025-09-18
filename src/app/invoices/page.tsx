@@ -1,6 +1,5 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { supabaseService as sb } from '@/lib/supabase';
-import { revalidatePath } from 'next/cache';
+import { markPaidAction } from './actions';
 
 type InvoiceRow = {
   id: string;
@@ -21,16 +20,6 @@ async function getInvoices(): Promise<InvoiceRow[]> {
     .order('due_date', { ascending: true });
   if (error) throw error;
   return (data as InvoiceRow[]) || [];
-}
-
-/** ACCIÓN: marcar como pagado (server action) */
-export async function markPaidAction(formData: FormData) {
-  'use server';
-  const id = String(formData.get('id') || '');
-  if (!id) return;
-  await sb.from('invoices').update({ status: 'paid' }).eq('id', id);
-  revalidatePath('/invoices');
-  revalidatePath('/');
 }
 
 export default async function InvoicesPage() {
